@@ -1,0 +1,21 @@
+dependencies:
+  example_init:
+    component_hash: null
+    source:
+      path: C:\Users\xuand\esp\v5.2.1\esp-idf\examples\bluetooth\esp_ble_mesh\common_components\example_init
+      type: local
+    version: '*'
+  example_nvs:
+    component_hash: null
+    source:
+      path: C:\Users\xuand\esp\v5.2.1\esp-idf\examples\bluetooth\esp_ble_mesh\common_components\example_nvs
+      type: local
+    version: '*'
+  idf:
+    component_hash: null
+    source:
+      type: idf
+    version: 5.2.1
+manifest_hash: 5d820ad39b46376c85e6ebf0d3f475461a6b47d41e505970e2da4308f91691ab
+target: esp32
+version: 1.0.0
