@@ -511,6 +511,37 @@ void example_ble_mesh_send_sensor_message(uint16_t addr, uint32_t opcode) {
     }
 }
 
+void send_reset_node(uint16_t addr) {
+    esp_ble_mesh_cfg_client_set_state_t set_state = {0};
+    esp_ble_mesh_client_common_param_t common = {0};
+    esp_err_t err = ESP_OK;
+    esp_ble_mesh_node_t *node =
+        esp_ble_mesh_provisioner_get_node_with_addr(addr);
+    example_ble_mesh_set_msg_common2(&common, node, config_client.model,
+                                     ESP_BLE_MESH_MODEL_OP_NODE_RESET);
+    set_state.model_app_bind.element_addr = node->unicast_addr;
+    set_state.model_app_bind.model_app_idx = prov_key.app_idx;
+
+    if (strcmp(model_setup, "ONOFF") == 0 ||
+        strcmp(model_setup, "SWITCH") == 0 ||
+        strcmp(model_setup, "BUTTON") == 0) {
+        set_state.model_app_bind.model_id = ESP_BLE_MESH_MODEL_ID_GEN_ONOFF_SRV;
+    } else if (strcmp(model_setup, "SENSOR") == 0) {
+        set_state.model_app_bind.model_id = ESP_BLE_MESH_MODEL_ID_SENSOR_SRV;
+
+    } else {
+        ESP_LOGE(TAG, "No valid model_id selected");
+        return;
+    }
+
+    set_state.model_app_bind.company_id = ESP_BLE_MESH_CID_NVAL;
+    err = esp_ble_mesh_config_client_set_state(&common, &set_state);
+    if (err) {
+        ESP_LOGE(TAG, "Send Node Reset failed");
+        return;
+    }
+}
+
 void send_to_cloud(double *values, int count, uint16_t unicast) {
     esp_ble_mesh_node_t *node =
         esp_ble_mesh_provisioner_get_node_with_addr(unicast);
@@ -794,6 +825,9 @@ static void example_ble_mesh_config_client_cb(
                     }
                     break;
                 }
+                case ESP_BLE_MESH_MODEL_OP_NODE_RESET:
+                    ESP_LOGI(TAG, "Node reset successfully");
+                    break;
                 default:
                     break;
             }
@@ -1607,7 +1641,6 @@ void mqtt_data_callback(uint8_t *data, uint16_t lenght) {
                 model_setup = malloc(strlen(type_item->valuestring) + 1);
                 if (model_setup != NULL) {
                     strcpy(model_setup, type_item->valuestring);
-                    printf("Type: %s\n", model_setup);
                 } else {
                     printf("Memory allocation failed\n");
                 }
@@ -1624,7 +1657,6 @@ void mqtt_data_callback(uint8_t *data, uint16_t lenght) {
         case MQTT_ACTION_CONTROL:
             uint16_t addr_control = 0x0000;
             uint16_t state = 9999;
-
             // Get addr
             cJSON *addr_item_control = cJSON_GetObjectItem(root, "addr");
             if (addr_item_control != NULL &&
@@ -1641,15 +1673,15 @@ void mqtt_data_callback(uint8_t *data, uint16_t lenght) {
             send_control_led_switch_state(addr_control, state);
             break;
         case 6:
-            // {"action":6,"addr":"0x0008","state":0}
-            uint16_t addr_control_6 = 0x0000;
+            // {"action":6,"addr":"0x0006","state":0}
+            uint16_t addr_action_6 = 0x0000;
             uint16_t state_6 = 9999;
 
             // Get addr
             cJSON *addr_item_control_6 = cJSON_GetObjectItem(root, "addr");
             if (addr_item_control_6 != NULL &&
                 cJSON_IsString(addr_item_control_6)) {
-                addr_control_6 = (uint16_t)strtol(
+                addr_action_6 = (uint16_t)strtol(
                     addr_item_control_6->valuestring, NULL, 16);
             }
             // Get state
@@ -1665,9 +1697,32 @@ void mqtt_data_callback(uint8_t *data, uint16_t lenght) {
                 [4] = ESP_BLE_MESH_MODEL_OP_SENSOR_SERIES_GET,
             };
 
-            printf("Send -> 0x%04x, 0x%04x\n", addr_control_6, state_6);
-            example_ble_mesh_send_sensor_message(addr_control_6,
+            printf("Send -> 0x%04x, 0x%04x\n", addr_action_6, state_6);
+            example_ble_mesh_send_sensor_message(addr_action_6,
                                                  send_opcode[state_6]);
+            break;
+        case 7:
+            // {"action":7,"addr":"0x0006"}
+            uint16_t addr_action_7 = 0x0000;
+            cJSON *addr_item_action_7 = cJSON_GetObjectItem(root, "addr");
+            if (addr_item_action_7 != NULL &&
+                cJSON_IsString(addr_item_action_7)) {
+                addr_action_7 =
+                    (uint16_t)strtol(addr_item_action_7->valuestring, NULL, 16);
+            }
+            cJSON *type_item_action_7 = cJSON_GetObjectItem(root, "type");
+            if (type_item_action_7 != NULL &&
+                cJSON_IsString(type_item_action_7)) {
+                model_setup =
+                    malloc(strlen(type_item_action_7->valuestring) + 1);
+                if (model_setup != NULL) {
+                    strcpy(model_setup, type_item_action_7->valuestring);
+                } else {
+                    printf("Memory allocation failed\n");
+                }
+            }
+            printf("Send -> 0x%04x\n", addr_action_7);
+            send_reset_node(addr_action_7);
             break;
         default:
             break;
