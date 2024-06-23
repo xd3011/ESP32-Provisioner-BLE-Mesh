@@ -19,11 +19,13 @@
 #include "esp_ble_mesh_config_model_api.h"
 #include "esp_ble_mesh_defs.h"
 #include "esp_ble_mesh_generic_model_api.h"
+#include "esp_ble_mesh_health_model_api.h"
 #include "esp_ble_mesh_local_data_operation_api.h"
 #include "esp_ble_mesh_networking_api.h"
 #include "esp_ble_mesh_provisioning_api.h"
 #include "esp_ble_mesh_sensor_model_api.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_wifi.h"
 #include "mqtt_client.h"
 #include "nvs.h"
@@ -94,6 +96,12 @@ char *model_setup = "ONOFF";
 #define MQTT_ACTION_DISENABLE_PROVISIONER 3
 #define MQTT_ACTION_PROVISION 4
 #define MQTT_ACTION_CONTROL 5
+#define MQTT_ACTION_GET_SENSOR_DATA 6
+#define MQTT_ACTION_REMOVE_NODE 7
+#define MQTT_ACTION_HEARTBEAT 8
+#define MQTT_ACTION_GATEWAY_STATE 9
+
+uint8_t mac_address[6];
 
 #define TAG "EXAMPLE"
 
@@ -133,6 +141,7 @@ static struct esp_ble_mesh_key {
 static esp_ble_mesh_client_t config_client;
 static esp_ble_mesh_client_t onoff_client;
 static esp_ble_mesh_client_t sensor_client;
+static esp_ble_mesh_client_t health_client;
 
 static esp_ble_mesh_cfg_srv_t config_server = {
     /* 3 transmissions with 20ms interval */
@@ -158,6 +167,7 @@ static esp_ble_mesh_model_t root_models[] = {
     ESP_BLE_MESH_MODEL_CFG_CLI(&config_client),
     ESP_BLE_MESH_MODEL_GEN_ONOFF_CLI(NULL, &onoff_client),
     ESP_BLE_MESH_MODEL_SENSOR_CLI(NULL, &sensor_client),
+    ESP_BLE_MESH_MODEL_HEALTH_CLI(&health_client),
 };
 
 static esp_ble_mesh_elem_t elements[] = {
@@ -393,21 +403,6 @@ static void mqtt_action_provision(uint8_t dev_uuid[16],
     return;
 }
 
-static void example_ble_mesh_set_msg_common2(
-    esp_ble_mesh_client_common_param_t *common, esp_ble_mesh_node_t *node,
-    esp_ble_mesh_model_t *model, uint32_t opcode) {
-    common->opcode = opcode;
-    common->model = model;
-    common->ctx.net_idx = prov_key.net_idx;
-    common->ctx.app_idx = prov_key.app_idx;
-    common->ctx.addr = node->unicast_addr;
-    common->ctx.send_ttl = MSG_SEND_TTL;
-    common->msg_timeout = MSG_TIMEOUT;
-#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 2, 0)
-    common->msg_role = MSG_ROLE;
-#endif
-}
-
 void example_ble_mesh_send_sensor_message(uint16_t addr, uint32_t opcode) {
     esp_ble_mesh_sensor_client_get_state_t get = {0};
     esp_ble_mesh_client_common_param_t common = {0};
@@ -420,8 +415,7 @@ void example_ble_mesh_send_sensor_message(uint16_t addr, uint32_t opcode) {
         return;
     }
 
-    example_ble_mesh_set_msg_common2(&common, node, sensor_client.model,
-                                     opcode);
+    example_ble_mesh_set_msg_common(&common, node, sensor_client.model, opcode);
     switch (opcode) {
         case ESP_BLE_MESH_MODEL_OP_SENSOR_CADENCE_GET:
             get.cadence_get.property_id = sensor_prop_id;
@@ -448,8 +442,8 @@ void send_reset_node(uint16_t addr) {
     esp_err_t err = ESP_OK;
     esp_ble_mesh_node_t *node =
         esp_ble_mesh_provisioner_get_node_with_addr(addr);
-    example_ble_mesh_set_msg_common2(&common, node, config_client.model,
-                                     ESP_BLE_MESH_MODEL_OP_NODE_RESET);
+    example_ble_mesh_set_msg_common(&common, node, config_client.model,
+                                    ESP_BLE_MESH_MODEL_OP_NODE_RESET);
     set_state.model_app_bind.element_addr = node->unicast_addr;
     set_state.model_app_bind.model_app_idx = prov_key.app_idx;
 
@@ -471,6 +465,7 @@ void send_reset_node(uint16_t addr) {
         ESP_LOGE(TAG, "Send Node Reset failed");
         return;
     }
+    esp_ble_mesh_provisioner_delete_node_with_addr(addr);
 }
 
 void send_to_cloud(double *values, int count, uint16_t unicast) {
@@ -486,9 +481,10 @@ void send_to_cloud(double *values, int count, uint16_t unicast) {
         // DHT22 Sensor
         char mqtt_message[256];  // Tăng kích thước để chứa thêm dữ liệu
         snprintf(mqtt_message, sizeof(mqtt_message),
-                 "{\"unicast_addr\":%d, \"mac_address\":\"%s\", \"temp\":%.2f, "
-                 "\"humi\":%.2f}",
-                 unicast, addr_str, values[0], values[1]);
+                 "{\"mac_address\":\"%s\", "
+                 "\"data\":{\"temperature\":%.2f, "
+                 "\"humidity\":%.2f}}",
+                 addr_str, values[0], values[1]);
         int msg_id = esp_mqtt_client_publish(get_mqtt_client(), "home_iot/data",
                                              mqtt_message, 0, 0, 0);
         ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
@@ -497,6 +493,36 @@ void send_to_cloud(double *values, int count, uint16_t unicast) {
     }
     return;
 }
+
+void send_heartbeat_node(esp_ble_mesh_node_t *node) {
+    esp_ble_mesh_cfg_client_set_state_t set_state = {0};
+    esp_ble_mesh_client_common_param_t common = {0};
+    esp_err_t err = ESP_OK;
+    example_ble_mesh_set_msg_common(&common, node, config_client.model,
+                                    ESP_BLE_MESH_MODEL_OP_HEARTBEAT_PUB_SET);
+    set_state.heartbeat_pub_set.dst = node->unicast_addr;
+    set_state.heartbeat_pub_set.count = 2;
+    set_state.heartbeat_pub_set.period = 4;
+    set_state.heartbeat_pub_set.ttl = 7;
+    set_state.heartbeat_pub_set.feature = 0x0001;
+    set_state.heartbeat_pub_set.net_idx = prov_key.net_idx;
+    err = esp_ble_mesh_config_client_set_state(&common, &set_state);
+    if (err) {
+        ESP_LOGE(TAG, "Send Node Reset failed");
+        return;
+    }
+}
+
+void send_node_state_to_cloud(char *addr_str, uint16_t state) {
+    char mqtt_message[128];
+    snprintf(mqtt_message, sizeof(mqtt_message),
+             "{\"mac_address\":\"%s\", \"state\":%d}", addr_str, state);
+    int msg_id = esp_mqtt_client_publish(get_mqtt_client(), "home_iot/state",
+                                         mqtt_message, 0, 0, 0);
+    ESP_LOGI(TAG, "sent state successful, msg_id=%d", msg_id);
+    return;
+}
+
 static void example_ble_mesh_provisioning_cb(
     esp_ble_mesh_prov_cb_event_t event, esp_ble_mesh_prov_cb_param_t *param) {
     switch (event) {
@@ -643,6 +669,10 @@ static void example_ble_mesh_config_client_cb(
 
     node = esp_ble_mesh_provisioner_get_node_with_addr(addr);
     if (!node) {
+        if (opcode == ESP_BLE_MESH_MODEL_OP_NODE_RESET) {
+            ESP_LOGI(TAG, "Node reset successfully");
+            return;
+        }
         ESP_LOGE(TAG, "%s: Get node info failed", __func__);
         return;
     }
@@ -760,6 +790,27 @@ static void example_ble_mesh_config_client_cb(
                 case ESP_BLE_MESH_MODEL_OP_NODE_RESET:
                     ESP_LOGI(TAG, "Node reset successfully");
                     break;
+                case ESP_BLE_MESH_MODEL_OP_HEARTBEAT_PUB_SET: {
+                    if (param->status_cb.heartbeat_pub_status.status ==
+                        ESP_BLE_MESH_CFG_STATUS_SUCCESS) {
+                        ESP_LOGI(TAG, "Heartbeat publication set successfully");
+                    } else {
+                        ESP_LOGE(TAG,
+                                 "Failed to set heartbeat publication, status "
+                                 "code: %d",
+                                 param->status_cb.heartbeat_pub_status.status);
+                    }
+                    char addr_str[18];
+                    if (node) {
+                        sprintf(addr_str, "%02X:%02X:%02X:%02X:%02X:%02X",
+                                node->addr[0], node->addr[1], node->addr[2],
+                                node->addr[3], node->addr[4], node->addr[5]);
+                    }
+                    send_node_state_to_cloud(
+                        addr_str,
+                        param->status_cb.heartbeat_pub_status.features);
+                    break;
+                }
                 default:
                     break;
             }
@@ -858,6 +909,27 @@ static void example_ble_mesh_config_client_cb(
                     }
                     break;
                 }
+                case ESP_BLE_MESH_MODEL_OP_HEARTBEAT_PUB_SET: {
+                    if (param->status_cb.heartbeat_pub_status.status ==
+                        ESP_BLE_MESH_CFG_STATUS_SUCCESS) {
+                        ESP_LOGI(TAG, "Heartbeat publication set successfully");
+                    } else {
+                        ESP_LOGE(TAG,
+                                 "Failed to set heartbeat publication, status "
+                                 "code: %d",
+                                 param->status_cb.heartbeat_pub_status.status);
+                    }
+                    char addr_str[18];
+                    if (node) {
+                        sprintf(addr_str, "%02X:%02X:%02X:%02X:%02X:%02X",
+                                node->addr[0], node->addr[1], node->addr[2],
+                                node->addr[3], node->addr[4], node->addr[5]);
+                    }
+                    send_node_state_to_cloud(
+                        addr_str,
+                        param->status_cb.heartbeat_pub_status.features);
+                    break;
+                }
                 default:
                     break;
             }
@@ -943,6 +1015,20 @@ static void example_ble_mesh_generic_client_cb(
             }
             break;
         case ESP_BLE_MESH_GENERIC_CLIENT_PUBLISH_EVT:
+            switch (opcode) {
+                case ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_STATUS:
+                    ESP_LOGI(TAG,
+                             "ESP_BLE_MESH_MODEL_OP_GEN_ONOFF_STATUS. onoff: "
+                             "0x%02x, target_onoff: 0x%02x, remain_time: "
+                             "0x%02x, op_en: %d",
+                             param->status_cb.onoff_status.present_onoff,
+                             param->status_cb.onoff_status.target_onoff,
+                             param->status_cb.onoff_status.remain_time,
+                             param->status_cb.onoff_status.op_en);
+                    break;
+                default:
+                    break;
+            }
             break;
         case ESP_BLE_MESH_GENERIC_CLIENT_TIMEOUT_EVT:
             /* If failed to receive the responses, these messages will be resend
@@ -1609,7 +1695,7 @@ void mqtt_data_callback(uint8_t *data, uint16_t lenght) {
             printf("Send -> 0x%04x, 0x%04x\n", addr_control, state);
             send_control_led_switch_state(addr_control, state);
             break;
-        case 6:
+        case MQTT_ACTION_GET_SENSOR_DATA:
             // {"action":6,"addr":"0x0006","state":0}
             uint16_t addr_action_6 = 0x0000;
             uint16_t state_6 = 9999;
@@ -1638,7 +1724,7 @@ void mqtt_data_callback(uint8_t *data, uint16_t lenght) {
             example_ble_mesh_send_sensor_message(addr_action_6,
                                                  send_opcode[state_6]);
             break;
-        case 7:
+        case MQTT_ACTION_REMOVE_NODE:
             // {"action":7,"addr":"0x0006"}
             uint16_t addr_action_7 = 0x0000;
             cJSON *addr_item_action_7 = cJSON_GetObjectItem(root, "addr");
@@ -1661,43 +1747,50 @@ void mqtt_data_callback(uint8_t *data, uint16_t lenght) {
             printf("Send -> 0x%04x\n", addr_action_7);
             send_reset_node(addr_action_7);
             break;
+        case MQTT_ACTION_HEARTBEAT:
+            // {"action":8}
+            const esp_ble_mesh_node_t **node_entry =
+                esp_ble_mesh_provisioner_get_node_table_entry();
+            for (int i = 0; i < CONFIG_BLE_MESH_MAX_PROV_NODES; i++) {
+                const esp_ble_mesh_node_t *node = node_entry[i];
+                if (node) {
+                    printf("Node Addr: 0x%04x\n", node->unicast_addr);
+                    send_heartbeat_node(node);
+                }
+            }
+            break;
+        case MQTT_ACTION_GATEWAY_STATE:
+            // {"action":9}
+            char mac_str[18];
+            sprintf(mac_str, "%02X:%02X:%02X:%02X:%02X:%02X", mac_address[0],
+                    mac_address[1], mac_address[2], mac_address[3],
+                    mac_address[4], mac_address[5]);
+            send_node_state_to_cloud(mac_str, 0x0001);
+            break;
         default:
             break;
     }
 }
 
-esp_err_t test() {
-    nvs_handle_t my_handle;
-    esp_err_t err;
-
-    // Open
-    err = nvs_open("ble_mesh_node", NVS_READONLY, &my_handle);
-    if (err != ESP_OK) return err;
-
-    char index[3] = {0};  // Initialize index to zeros
-
-    size_t required_size = sizeof(index);
-    err = nvs_get_blob(my_handle, "index", index, &required_size);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGE(TAG, "Index blob not found, initializing to 0");
-        index[0] = '0';
-        index[1] = '\0';
-    } else if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get index blob, err: %d", err);
-        return err;
+void send_heartbeat_to_all_nodes_task(void *param) {
+    while (1) {
+        const esp_ble_mesh_node_t **node_entry =
+            esp_ble_mesh_provisioner_get_node_table_entry();
+        for (int i = 0; i < CONFIG_BLE_MESH_MAX_PROV_NODES; i++) {
+            const esp_ble_mesh_node_t *node = node_entry[i];
+            if (node) {
+                send_heartbeat_node(node);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(30000));  // Delay for 30 seconds
     }
-    printf("index blob: %s\n", index);
-
-    // Close
-    nvs_close(my_handle);
-
-    return ESP_OK;
 }
 
 void app_main(void) {
     esp_err_t err;
 
     ESP_LOGI(TAG, "Initializing...");
+    esp_read_mac(mac_address, 0);
 
     err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES) {
@@ -1713,7 +1806,6 @@ void app_main(void) {
     }
 
     ble_mesh_get_dev_uuid(dev_uuid);
-    test();
 
     /* Initialize the Bluetooth Mesh Subsystem */
     err = ble_mesh_init();
@@ -1722,4 +1814,6 @@ void app_main(void) {
     }
     mqtt_data_pt_set_callback(mqtt_data_callback);
     wifi_init_sta();
+    xTaskCreate(send_heartbeat_to_all_nodes_task, "SendHeartbeatTask", 2048,
+                NULL, 5, NULL);
 }
