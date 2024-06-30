@@ -4,12 +4,10 @@
 ## ESP32 BLE Mesh Gateway and Provisioner
 
 ### This repo is how to:
+
 1. Provision devices into a BLE Mesh network
-
 2. Control devices in a BLE Mesh network
-
 3. Get device status in the BLE Mesh network
-
 4. AP mode update network configuration
 
 ### How to use:
