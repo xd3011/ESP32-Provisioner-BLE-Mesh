@@ -1,4 +1,10 @@
 dependencies:
+  button:
+    component_hash: null
+    source:
+      path: C:\Users\xuand\esp\v5.2.1\esp-idf\examples\bluetooth\esp_ble_mesh\common_components\button
+      type: local
+    version: '*'
   example_init:
     component_hash: null
     source:
@@ -16,6 +22,6 @@ dependencies:
     source:
       type: idf
     version: 5.2.1
-manifest_hash: 5d820ad39b46376c85e6ebf0d3f475461a6b47d41e505970e2da4308f91691ab
+manifest_hash: aea8b5a9bd1247ef0d3cab981380f94e4edfbef029e683ba8074efd1e4a64758
 target: esp32
 version: 1.0.0

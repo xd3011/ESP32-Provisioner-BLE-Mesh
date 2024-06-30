@@ -7,6 +7,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <ap_mode.h>
+#include <esp_http_server.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,6 +16,7 @@
 #include "app_mqtt.h"
 #include "ble_mesh_example_init.h"
 #include "ble_mesh_example_nvs.h"
+#include "board.h"
 #include "cJSON.h"
 #include "esp_ble_mesh_common_api.h"
 #include "esp_ble_mesh_config_model_api.h"
@@ -40,8 +43,18 @@
 */
 #define EXAMPLE_ESP_WIFI_SSID "TFlash"
 #define EXAMPLE_ESP_WIFI_PASS "30112002"
+
+char wifi_ssid[32] = EXAMPLE_ESP_WIFI_SSID;
+char wifi_pass[64] = EXAMPLE_ESP_WIFI_PASS;
+
 #define EXAMPLE_ESP_MAXIMUM_RETRY 5
 #define CONFIG_ESP_WIFI_AUTH_OPEN 1
+
+#define AP_SSID "ESP32"
+#define AP_PASS "12345678"
+#define AP_CHANNEL 1
+#define AP_MAX_CONN 4
+#define AP_AUTHMODE WIFI_AUTH_WPA_WPA2_PSK
 
 #if CONFIG_ESP_WPA3_SAE_PWE_HUNT_AND_PECK
 #define ESP_WIFI_SAE_MODE WPA3_SAE_PWE_HUNT_AND_PECK
@@ -100,6 +113,8 @@ char *model_setup = "ONOFF";
 #define MQTT_ACTION_REMOVE_NODE 7
 #define MQTT_ACTION_HEARTBEAT 8
 #define MQTT_ACTION_GATEWAY_STATE 9
+
+TaskHandle_t heartbeatTaskHandle = NULL;
 
 uint8_t mac_address[6];
 
@@ -501,14 +516,14 @@ void send_heartbeat_node(esp_ble_mesh_node_t *node) {
     example_ble_mesh_set_msg_common(&common, node, config_client.model,
                                     ESP_BLE_MESH_MODEL_OP_HEARTBEAT_PUB_SET);
     set_state.heartbeat_pub_set.dst = node->unicast_addr;
-    set_state.heartbeat_pub_set.count = 2;
-    set_state.heartbeat_pub_set.period = 4;
+    set_state.heartbeat_pub_set.count = 4;
+    set_state.heartbeat_pub_set.period = 5;
     set_state.heartbeat_pub_set.ttl = 7;
     set_state.heartbeat_pub_set.feature = 0x0001;
     set_state.heartbeat_pub_set.net_idx = prov_key.net_idx;
     err = esp_ble_mesh_config_client_set_state(&common, &set_state);
     if (err) {
-        ESP_LOGE(TAG, "Send Node Reset failed");
+        ESP_LOGE(TAG, "Send Node Hearbeat failed");
         return;
     }
 }
@@ -1552,6 +1567,11 @@ void wifi_init_sta(void) {
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip));
 
+    char ssid[32] = {0};
+    char password[64] = {0};
+    strncpy(ssid, wifi_ssid, sizeof(ssid) - 1);
+    strncpy(password, wifi_pass, sizeof(password) - 1);
+
     wifi_config_t wifi_config = {
         .sta =
             {
@@ -1568,6 +1588,10 @@ void wifi_init_sta(void) {
                 .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
             },
     };
+
+    memcpy(wifi_config.sta.ssid, ssid, sizeof(ssid));
+    memcpy(wifi_config.sta.password, password, sizeof(password));
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -1755,7 +1779,7 @@ void mqtt_data_callback(uint8_t *data, uint16_t lenght) {
                 const esp_ble_mesh_node_t *node = node_entry[i];
                 if (node) {
                     printf("Node Addr: 0x%04x\n", node->unicast_addr);
-                    send_heartbeat_node(node);
+                    send_heartbeat_node((esp_ble_mesh_node_t *)node);
                 }
             }
             break;
@@ -1779,10 +1803,110 @@ void send_heartbeat_to_all_nodes_task(void *param) {
         for (int i = 0; i < CONFIG_BLE_MESH_MAX_PROV_NODES; i++) {
             const esp_ble_mesh_node_t *node = node_entry[i];
             if (node) {
-                send_heartbeat_node(node);
+                send_heartbeat_node((esp_ble_mesh_node_t *)node);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(30000));  // Delay for 30 seconds
+    }
+}
+
+void change_sta_to_ap() {
+    esp_err_t err;
+
+    if (heartbeatTaskHandle != NULL) {
+        vTaskDelete(heartbeatTaskHandle);
+        heartbeatTaskHandle = NULL;  // Đặt lại handle về NULL sau khi hủy task
+        ESP_LOGI(TAG, "Heartbeat task stopped.");
+    }
+
+    mqtt_app_stop();
+
+    err = esp_wifi_stop();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to stop WiFi: %s", esp_err_to_name(err));
+    }
+    esp_netif_create_default_wifi_ap();
+    static httpd_handle_t server = NULL;
+    wifi_config_t ap_config = {
+        .ap =
+            {
+                .ssid = AP_SSID,
+                .ssid_len = strlen(AP_SSID),
+                .password = AP_PASS,
+                .channel = AP_CHANNEL,
+                .max_connection = AP_MAX_CONN,
+                .authmode = AP_AUTHMODE,
+                .pmf_cfg =
+                    {
+                        .required = true,
+                    },
+            },
+    };
+
+    if (strlen(AP_PASS) == 0) {
+        ap_config.ap.authmode = WIFI_AUTH_OPEN;
+    }
+
+    err = esp_wifi_set_mode(WIFI_MODE_AP);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set WiFi mode to AP: %s",
+                 esp_err_to_name(err));
+        return;
+    }
+
+    err = esp_wifi_set_config(ESP_IF_WIFI_AP, &ap_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set WiFi AP config: %s", esp_err_to_name(err));
+        return;
+    }
+
+    // Khởi động WiFi ở chế độ AP
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start WiFi in AP mode: %s",
+                 esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "WiFi started in AP mode with SSID %s", AP_SSID);
+    }
+    ESP_ERROR_CHECK(esp_netif_init());
+    err = esp_event_handler_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED,
+                                     &connect_handler, &server);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register IP_EVENT handler: %s",
+                 esp_err_to_name(err));
+    }
+}
+
+void get_data_nvs() {
+    nvs_handle_t my_handle;
+    esp_err_t err;
+    err = nvs_open("config", NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error (%s) opening NVS handle!", esp_err_to_name(err));
+    } else {
+        size_t ssid_len = 32;
+        char ssid[32];
+        err = nvs_get_str(my_handle, "ssid", ssid, &ssid_len);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Error (%s) reading SSID from NVS!",
+                     esp_err_to_name(err));
+        } else {
+            strncpy(wifi_ssid, ssid, sizeof(wifi_ssid) - 1);
+            wifi_ssid[sizeof(wifi_ssid) - 1] = '\0';
+        }
+
+        size_t password_len = 64;
+        char password[64];
+        err = nvs_get_str(my_handle, "password", password, &password_len);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Error (%s) reading password from NVS!",
+                     esp_err_to_name(err));
+        } else {
+            strncpy(wifi_pass, password, sizeof(wifi_pass) - 1);
+            wifi_pass[sizeof(wifi_pass) - 1] = '\0';
+        }
+
+        nvs_close(my_handle);
     }
 }
 
@@ -1790,7 +1914,6 @@ void app_main(void) {
     esp_err_t err;
 
     ESP_LOGI(TAG, "Initializing...");
-    esp_read_mac(mac_address, 0);
 
     err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES) {
@@ -1798,6 +1921,8 @@ void app_main(void) {
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+    get_data_nvs();
 
     err = bluetooth_init();
     if (err) {
@@ -1812,8 +1937,9 @@ void app_main(void) {
     if (err) {
         ESP_LOGE(TAG, "Bluetooth mesh init failed (err %d)", err);
     }
+    board_init();
     mqtt_data_pt_set_callback(mqtt_data_callback);
     wifi_init_sta();
     xTaskCreate(send_heartbeat_to_all_nodes_task, "SendHeartbeatTask", 2048,
-                NULL, 5, NULL);
+                NULL, 5, &heartbeatTaskHandle);
 }

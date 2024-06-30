@@ -31,7 +31,7 @@
 
 static const char *TAG = "mqtts_example";
 
-uint8_t mac_address[6];  // Initialize mac_address variable
+extern uint8_t mac_address[];  // Initialize mac_address variable
 
 static esp_mqtt_client_handle_t client;
 static mqtt_data_pt_t mqtt_data_pt = NULL;
@@ -137,6 +137,13 @@ void mqtt_app_start(void) {
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler,
                                    NULL);
     esp_mqtt_client_start(client);
+}
+
+void mqtt_app_stop() {
+    if (client != NULL) {
+        esp_mqtt_client_stop(client);
+        ESP_LOGI(TAG, "MQTT client stopped.");
+    }
 }
 
 void mqtt_data_pt_set_callback(void *cb) {
